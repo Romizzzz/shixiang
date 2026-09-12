@@ -28,6 +28,7 @@ try:
     pump(root)
     app.shape.set("圆形")
     app.custom.set(True)
+    app.size_mode.set("resize")
     app.width.set("240")
     app.height.set("240")
     app.capture()
@@ -55,6 +56,33 @@ try:
     pump(root)
     assert app.overlay is None and root.state() == "normal"
     assert app.image is previous
+    app.size_mode.set("fixed")
+    app.shape.set("矩形")
+    app.width.set("240")
+    app.height.set("160")
+    app.capture()
+    pump(root, .7)
+    overlay = app.overlay
+    assert overlay is not None and app.capture_size is None
+    x0, y0, x1, y1 = overlay.fixed
+    assert (x1 - x0, y1 - y0) == (240, 160)
+    overlay.canvas.event_generate("<ButtonPress-1>", x=x0 + 30, y=y0 + 30)
+    overlay.canvas.event_generate("<B1-Motion>", x=x0 - 30, y=y0 - 10)
+    overlay.canvas.event_generate("<ButtonRelease-1>", x=x0 - 30, y=y0 - 10)
+    pump(root)
+    assert app.overlay is overlay, "Releasing a fixed frame must not capture"
+    assert overlay.fixed[:2] == (max(0, x0 - 60), max(0, y0 - 40))
+    overlay.nudge((1, 0), 1)
+    expected = overlay.screen.crop(overlay.fixed).convert("RGBA")
+    overlay.window.event_generate("<Return>")
+    pump(root)
+    assert app.overlay is None and app.image.size == (240, 160)
+    assert app.image.tobytes() == expected.tobytes(), "Fixed capture resampled pixels"
+    app.capture()
+    pump(root, .7)
+    app.overlay.window.event_generate("<Button-3>", x=20, y=20)
+    pump(root)
+    assert app.overlay is None and root.state() == "normal"
     # Use a generated image in the saved preview, never desktop contents.
     from PIL import Image, ImageDraw
     sample = Image.new("RGBA", (1000, 660), "#ecf6f2")
@@ -78,6 +106,6 @@ try:
     pump(root, .5)
     x, y = root.winfo_rootx(), root.winfo_rooty()
     ImageGrab.grab((x, y, x + root.winfo_width(), y + root.winfo_height())).save(folder / "ui-preview.png")
-    print("PASS: hide, circular capture, custom pixels, compression, right-click cancel, restore, preview")
+    print("PASS: hide, resize capture, movable fixed frame, exact pixels, Enter, compression, right-click cancel, restore, preview")
 finally:
     root.destroy()

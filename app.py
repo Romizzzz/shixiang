@@ -12,7 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageGrab, ImageOps, ImageTk
-from image_ops import compress, encode, make_capture, selection_box
+from image_ops import compress, encode, fixed_box, make_capture, selection_box
 
 SHAPES = {"矩形": "rectangle", "正方形": "square", "圆形": "circle", "椭圆": "ellipse"}
 warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -30,6 +30,14 @@ def dpi_aware():
 class CaptureOverlay:
     def __init__(self, app, screen, origin):
         self.app, self.screen, self.start = app, screen, None
+        self.fixed = None
+        self.drag_origin = None
+        if app.fixed_capture_size:
+            fw, fh = app.fixed_capture_size
+            pointer = app.root.winfo_pointerxy()
+            self.fixed = fixed_box((pointer[0] - origin[0] - fw // 2,
+                                    pointer[1] - origin[1] - fh // 2),
+                                   (fw, fh), screen.size)
         self.window = tk.Toplevel(app.root)
         self.window.withdraw()
         self.window.overrideredirect(True)
@@ -45,6 +53,19 @@ class CaptureOverlay:
         self.canvas.bind("<ButtonRelease-1>", self.release)
         self.window.bind("<Button-3>", lambda e: self.close())
         self.window.bind("<Escape>", lambda e: self.close())
+        if self.fixed:
+            self.canvas.config(cursor="fleur")
+            self.toolbar = ttk.Frame(self.canvas, padding=4)
+            ttk.Label(self.toolbar, text=f"{fw} × {fh} px").pack(side="left", padx=8)
+            ttk.Button(self.toolbar, text="确认截图", command=self.confirm, style="Accent.TButton").pack(side="left", padx=4)
+            ttk.Button(self.toolbar, text="取消", command=self.close).pack(side="left")
+            self.toolbar_id = self.canvas.create_window(0, 0, window=self.toolbar, anchor="nw")
+            self.window.bind("<Return>", lambda e: self.confirm())
+            for key, delta in (("Left", (-1, 0)), ("Right", (1, 0)),
+                               ("Up", (0, -1)), ("Down", (0, 1))):
+                self.window.bind(f"<{key}>", lambda e, d=delta: self.nudge(d, 1))
+                self.window.bind(f"<Shift-{key}>", lambda e, d=delta: self.nudge(d, 10))
+            self.draw_selection(self.fixed)
         self.window.deiconify()
         self.window.update_idletasks()
         # Win32 placement handles negative virtual-desktop coordinates directly.
@@ -54,6 +75,11 @@ class CaptureOverlay:
         self.window.grab_set()
 
     def press(self, event):
+        if self.fixed:
+            x0, y0, x1, y1 = self.fixed
+            if not (x0 <= event.x <= x1 and y0 <= event.y <= y1):
+                return
+            self.drag_origin = self.fixed[:2]
         self.start = (event.x, event.y)
 
     def box(self, event):
@@ -63,21 +89,57 @@ class CaptureOverlay:
     def drag(self, event):
         if self.start is None:
             return
-        box = self.box(event)
+        if self.fixed:
+            self.fixed = fixed_box((self.drag_origin[0] + event.x - self.start[0],
+                                    self.drag_origin[1] + event.y - self.start[1]),
+                                   self.app.fixed_capture_size, self.screen.size)
+            self.draw_selection(self.fixed)
+        else:
+            self.draw_selection(self.box(event))
+
+    def draw_selection(self, box):
         self.canvas.delete("selection")
         draw = self.canvas.create_oval if self.app.capture_shape in ("circle", "ellipse") else self.canvas.create_rectangle
         draw(*box, outline="#07966b", width=3, tags="selection")
-        self.canvas.create_text(box[0] + 8, max(16, box[1] - 14), anchor="w",
-                                text=f"{box[2]-box[0]} × {box[3]-box[1]} px",
-                                fill="#078251", font=("Segoe UI", 12, "bold"), tags="selection")
+        if self.fixed:
+            self.toolbar.update_idletasks()
+            tw, th = self.toolbar.winfo_reqwidth(), self.toolbar.winfo_reqheight()
+            x = max(0, min(box[0], self.screen.width - tw))
+            y = box[3] + 8
+            if y + th > self.screen.height:
+                y = max(0, box[1] - th - 8)
+            self.canvas.coords(self.toolbar_id, x, y)
+            self.canvas.tag_raise(self.toolbar_id)
+        else:
+            self.canvas.create_text(box[0] + 8, max(16, box[1] - 14), anchor="w",
+                                    text=f"{box[2]-box[0]} × {box[3]-box[1]} px",
+                                    fill="#078251", font=("Segoe UI", 12, "bold"), tags="selection")
+
+    def nudge(self, delta, step):
+        self.fixed = fixed_box((self.fixed[0] + delta[0] * step,
+                                self.fixed[1] + delta[1] * step),
+                               self.app.fixed_capture_size, self.screen.size)
+        self.draw_selection(self.fixed)
+        return "break"
+
+    def confirm(self):
+        self.finish(self.fixed)
 
     def release(self, event):
+        if self.fixed:
+            if self.start is not None:
+                self.drag(event)
+            self.start = None
+            return
         if self.start is None:
             return
         box = self.box(event)
         if box[2] - box[0] < 2 or box[3] - box[1] < 2:
             self.start = None
             return
+        self.finish(box)
+
+    def finish(self, box):
         try:
             image = make_capture(self.screen, box, self.app.capture_shape, self.app.capture_size)
             self.app.set_image(image, "新截图")
@@ -132,16 +194,29 @@ class App:
         ttk.Combobox(controls, textvariable=self.shape, values=list(SHAPES), state="readonly").pack(fill="x", pady=(5, 12))
         self.custom = tk.BooleanVar(value=False)
         ttk.Checkbutton(controls, text="自定义输出尺寸", variable=self.custom).pack(anchor="w")
+        modes = ttk.Frame(controls)
+        modes.pack(fill="x", pady=(4, 0))
+        self.size_mode = tk.StringVar(value="fixed")
+        self.mode_buttons = [
+            ttk.Radiobutton(modes, text="固定截图框", variable=self.size_mode, value="fixed"),
+            ttk.Radiobutton(modes, text="截图后缩放", variable=self.size_mode, value="resize"),
+        ]
+        for button in self.mode_buttons:
+            button.pack(side="left", padx=(0, 12))
         dims = ttk.Frame(controls)
-        dims.pack(fill="x", pady=(8, 14))
+        dims.pack(fill="x", pady=(6, 8))
         self.width, self.height = tk.StringVar(value="800"), tk.StringVar(value="800")
-        ttk.Entry(dims, textvariable=self.width, width=7).pack(side="left")
+        self.width_entry = ttk.Entry(dims, textvariable=self.width, width=7)
+        self.width_entry.pack(side="left")
         ttk.Label(dims, text=" × ").pack(side="left")
-        ttk.Entry(dims, textvariable=self.height, width=7).pack(side="left")
+        self.height_entry = ttk.Entry(dims, textvariable=self.height, width=7)
+        self.height_entry.pack(side="left")
         ttk.Label(dims, text=" px").pack(side="left")
+        self.custom.trace_add("write", lambda *_: self.update_size_controls())
+        self.update_size_controls()
         self.capture_button = ttk.Button(controls, text="开始截图", style="Accent.TButton", command=self.capture)
         self.capture_button.pack(fill="x")
-        ttk.Separator(controls).pack(fill="x", pady=20)
+        ttk.Separator(controls).pack(fill="x", pady=10)
         ttk.Label(controls, text="压缩", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", pady=(0, 12))
         ttk.Label(controls, text="文件大小上限").pack(anchor="w")
         target_row = ttk.Frame(controls)
@@ -184,6 +259,11 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(100, self.poll)
 
+    def update_size_controls(self):
+        state = "normal" if self.custom.get() else "disabled"
+        for control in (*self.mode_buttons, self.width_entry, self.height_entry):
+            control.config(state=state)
+
     def restore(self):
         self.root.deiconify()
         self.root.lift()
@@ -198,13 +278,17 @@ class App:
         try:
             self.capture_shape = SHAPES[self.shape.get()]
             self.capture_size = None
+            self.fixed_capture_size = None
             if self.custom.get():
                 w, h = int(self.width.get()), int(self.height.get())
                 if min(w, h) < 1 or max(w, h) > 8192 or w * h > 20_000_000:
                     raise ValueError("宽高须为 1–8192 px，且总像素不超过 2000 万")
                 if self.capture_shape in ("circle", "square") and w != h:
                     raise ValueError("圆形和正方形的输出宽高必须相同")
-                self.capture_size = (w, h)
+                if self.size_mode.get() == "fixed":
+                    self.fixed_capture_size = (w, h)
+                else:
+                    self.capture_size = (w, h)
             self.capture_button.config(state="disabled")
             self.root.withdraw()
             self.root.after(350, self.grab)

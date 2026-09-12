@@ -3,6 +3,15 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageOps
 
 
+def fixed_box(position, size, bounds):
+    w, h = size
+    if min(w, h) < 1 or w > bounds[0] or h > bounds[1]:
+        raise ValueError("固定截图框的尺寸不能超过屏幕范围")
+    x = max(0, min(bounds[0] - w, int(position[0])))
+    y = max(0, min(bounds[1] - h, int(position[1])))
+    return x, y, x + w, y + h
+
+
 def selection_box(start, end, bounds, square=False):
     x0, y0 = start
     x1 = max(0, min(bounds[0], end[0]))

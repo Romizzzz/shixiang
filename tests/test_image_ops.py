@@ -1,7 +1,7 @@
 import unittest
 from io import BytesIO
 from PIL import Image
-from image_ops import compress, make_capture, selection_box
+from image_ops import compress, fixed_box, make_capture, selection_box
 
 
 class ImageTests(unittest.TestCase):
@@ -45,6 +45,25 @@ class ImageTests(unittest.TestCase):
     def test_invalid_target(self):
         with self.assertRaises(ValueError):
             compress(self.image, 0)
+
+    def test_fixed_frame_keeps_size_at_edges(self):
+        self.assertEqual(fixed_box((-30, 999), (80, 60), (420, 300)),
+                         (0, 240, 80, 300))
+        self.assertEqual(fixed_box((999, -30), (80, 60), (420, 300)),
+                         (340, 0, 420, 60))
+        self.assertEqual(fixed_box((20, 20), (420, 300), (420, 300)),
+                         (0, 0, 420, 300))
+
+    def test_fixed_frame_rejects_oversize(self):
+        for size in ((421, 10), (10, 301), (0, 10)):
+            with self.assertRaises(ValueError):
+                fixed_box((0, 0), size, (420, 300))
+
+    def test_fixed_capture_preserves_pixels(self):
+        box = fixed_box((23, 17), (80, 60), self.image.size)
+        result = make_capture(self.image, box, "rectangle")
+        self.assertEqual(result.size, (80, 60))
+        self.assertEqual(result.tobytes(), self.image.crop(box).tobytes())
 
 
 if __name__ == "__main__":
